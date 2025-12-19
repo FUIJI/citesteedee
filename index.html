@@ -102,11 +102,8 @@
   <div id="loading-overlay" class="text-center">
     <div>
       <div class="text-2xl font-semibold mb-2">กำลังโหลดโมเดลมือ...</div>
-      <div class="text-sm text-slate-300" id="loading-subtext">โปรดอนุญาตการใช้กล้อง</div>
+      <div class="text-sm text-slate-300">โปรดอนุญาตการใช้กล้อง</div>
     </div>
-  </div>
-  <div id="error-banner" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-xl glass text-sm text-amber-200 border border-amber-400/60 shadow-lg max-w-3xl">
-    ไม่สามารถเปิดกล้องได้ ตรวจสอบว่าไม่ได้ถูกใช้งานโดยแอปอื่น หรืออนุญาตให้เว็บไซต์ใช้กล้อง แล้วลองรีเฟรชใหม่
   </div>
 
   <script type="module">
@@ -118,8 +115,6 @@
     const cursorEl = document.getElementById('custom-cursor');
     const tooltipEl = document.getElementById('tooltip');
     const loadingOverlay = document.getElementById('loading-overlay');
-    const loadingSubtext = document.getElementById('loading-subtext');
-    const errorBanner = document.getElementById('error-banner');
 
     const infoName = document.getElementById('info-name');
     const infoCountry = document.getElementById('info-country');
@@ -458,23 +453,7 @@
       ctx.restore();
     }
 
-    let cameraStream = null;
-    async function startCamera() {
-      try {
-        const constraints = { video: { width: 640, height: 480, facingMode: 'user' } };
-        cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
-        videoElement.srcObject = cameraStream;
-        await videoElement.play();
-        return true;
-      } catch (err) {
-        console.error('Failed to acquire camera feed:', err);
-        loadingSubtext.textContent = 'ไม่สามารถเปิดกล้องได้ โปรดตรวจสอบการอนุญาตหรือปิดแอปที่ใช้กล้องอยู่';
-        errorBanner.classList.remove('hidden');
-        return false;
-      }
-    }
-
-    async function initMediaPipe() {
+    function initMediaPipe() {
       const hands = new Hands({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
       });
@@ -490,16 +469,14 @@
         handleHandResults(results);
       });
 
-      const ok = await startCamera();
-      if (!ok) return;
-
-      const sendFrame = async () => {
-        await hands.send({ image: videoElement });
-        requestAnimationFrame(sendFrame);
-      };
-      videoElement.onloadeddata = () => {
-        requestAnimationFrame(sendFrame);
-      };
+      const cameraMP = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480,
+      });
+      cameraMP.start();
     }
 
     window.addEventListener('resize', () => {
@@ -514,12 +491,6 @@
 
     init();
     initMediaPipe();
-
-    window.addEventListener('beforeunload', () => {
-      if (cameraStream) {
-        cameraStream.getTracks().forEach((t) => t.stop());
-      }
-    });
   </script>
 </body>
 </html>
