@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Earth Gestures - Three.js & MediaPipe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      margin: 0;
+      font-family: 'Sarabun', 'Inter', sans-serif;
+      background: radial-gradient(circle at 20% 20%, rgba(0, 98, 255, 0.25), transparent 35%),
+                  radial-gradient(circle at 80% 10%, rgba(0, 255, 200, 0.2), transparent 30%),
+                  #050915;
+      overflow: hidden;
+    }
+    #scene-container {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+    }
+    .glass {
+      background: rgba(18, 25, 42, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+      backdrop-filter: blur(14px);
+    }
+    #custom-cursor {
+      position: fixed;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #00e5ff;
+      box-shadow: 0 0 20px rgba(0, 229, 255, 0.7);
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      z-index: 50;
+    }
+    #tooltip {
+      pointer-events: none;
+      transform: translate(-50%, -140%);
+    }
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 9, 21, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #e5e7eb;
+      z-index: 60;
+      transition: opacity 0.5s ease, visibility 0.5s ease;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.165.0/build/three.module.js"
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+  <div id="scene-container"></div>
+
+  <div class="relative z-10 flex items-start justify-between p-6 gap-6">
+    <div class="glass rounded-2xl p-5 w-80 text-slate-100">
+      <h2 class="text-xl font-semibold mb-3">คำแนะนำ</h2>
+      <ul class="space-y-2 text-sm leading-relaxed">
+        <li>• ชี้ไปที่จุดเพื่อเลือกเมือง</li>
+        <li>• หยิบ (Pinch) แล้วหมุนมือเพื่อหมุนโลก</li>
+      </ul>
+      <div class="mt-4 relative overflow-hidden rounded-xl border border-white/10">
+        <video id="webcam" class="w-full h-48 object-cover scale-x-[-1]" autoplay playsinline muted></video>
+        <canvas id="output-canvas" class="absolute inset-0 w-full h-full pointer-events-none"></canvas>
+      </div>
+    </div>
+
+    <div class="glass rounded-2xl p-5 w-96 text-slate-100 ml-auto">
+      <h2 class="text-xl font-semibold mb-3">ข้อมูลเมือง</h2>
+      <div id="city-info" class="space-y-1 text-sm">
+        <div class="text-lg font-semibold">เมือง: <span id="info-name">-</span></div>
+        <div>ประเทศ: <span id="info-country">-</span></div>
+        <div>เวลา: <span id="info-time">-</span></div>
+        <div>ระยะทางจากกรุงเทพฯ: <span id="info-distance">-</span></div>
+        <div>พิกัด: <span id="info-coord">-</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tooltip" class="fixed z-40 px-3 py-2 rounded-xl glass text-xs text-slate-100 hidden"></div>
+  <div id="custom-cursor"></div>
+  <div id="loading-overlay" class="text-center">
+    <div>
+      <div class="text-2xl font-semibold mb-2">กำลังโหลดโมเดลมือ...</div>
+      <div class="text-sm text-slate-300">โปรดอนุญาตการใช้กล้อง</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    const sceneContainer = document.getElementById('scene-container');
+    const videoElement = document.getElementById('webcam');
+    const outputCanvas = document.getElementById('output-canvas');
+    const cursorEl = document.getElementById('custom-cursor');
+    const tooltipEl = document.getElementById('tooltip');
+    const loadingOverlay = document.getElementById('loading-overlay');
+
+    const infoName = document.getElementById('info-name');
+    const infoCountry = document.getElementById('info-country');
+    const infoTime = document.getElementById('info-time');
+    const infoDistance = document.getElementById('info-distance');
+    const infoCoord = document.getElementById('info-coord');
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    sceneContainer.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 0, 8);
+
+    const ambientLight = new THREE.AmbientLight(0x335577, 0.6);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.1);
+    directionalLight.position.set(5, 3, 5);
+    scene.add(ambientLight, directionalLight);
+
+    const starGeometry = new THREE.BufferGeometry();
+    const starCount = 2000;
+    const starPositions = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount * 3; i += 3) {
+      const r = THREE.MathUtils.randFloat(200, 600);
+      const theta = THREE.MathUtils.randFloatSpread(360) * THREE.MathUtils.DEG2RAD;
+      const phi = THREE.MathUtils.randFloatSpread(180) * THREE.MathUtils.DEG2RAD;
+      starPositions[i] = r * Math.sin(phi) * Math.cos(theta);
+      starPositions[i + 1] = r * Math.sin(phi) * Math.sin(theta);
+      starPositions[i + 2] = r * Math.cos(phi);
+    }
+    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 1.2, sizeAttenuation: true });
+    const stars = new THREE.Points(starGeometry, starMaterial);
+    scene.add(stars);
+
+    const loader = new THREE.TextureLoader();
+    const earthGroup = new THREE.Group();
+    scene.add(earthGroup);
+
+    function createNoiseTexture(size = 256) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      const imageData = ctx.createImageData(size, size);
+      for (let i = 0; i < imageData.data.length; i += 4) {
+        const v = Math.random() * 255;
+        imageData.data[i] = v;
+        imageData.data[i + 1] = v * 0.9;
+        imageData.data[i + 2] = v * 0.8;
+        imageData.data[i + 3] = 255;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.anisotropy = 4;
+      return tex;
+    }
+
+    function loadTextureWithFallback(url) {
+      return new Promise((resolve) => {
+        loader.load(url, (texture) => {
+          texture.anisotropy = 8;
+          resolve(texture);
+        }, undefined, () => {
+          resolve(createNoiseTexture());
+        });
+      });
+    }
+
+    async function buildEarth() {
+      const [diffuse, specular, normal, clouds] = await Promise.all([
+        loadTextureWithFallback('https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg'),
+        loadTextureWithFallback('https://threejs.org/examples/textures/planets/earth_specular_2048.jpg'),
+        loadTextureWithFallback('https://threejs.org/examples/textures/planets/earth_normal_2048.jpg'),
+        loadTextureWithFallback('https://threejs.org/examples/textures/planets/earth_clouds_2048.png'),
+      ]);
+
+      const earthGeo = new THREE.SphereGeometry(2.5, 80, 80);
+      const earthMat = new THREE.MeshPhongMaterial({
+        map: diffuse,
+        specularMap: specular,
+        normalMap: normal,
+        shininess: 12,
+      });
+      const earthMesh = new THREE.Mesh(earthGeo, earthMat);
+      earthGroup.add(earthMesh);
+
+      const cloudGeo = new THREE.SphereGeometry(2.55, 80, 80);
+      const cloudMat = new THREE.MeshPhongMaterial({
+        map: clouds,
+        transparent: true,
+        opacity: 0.4,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
+      earthGroup.add(cloudMesh);
+
+      const atmosphereGeo = new THREE.SphereGeometry(2.7, 60, 60);
+      const atmosphereMat = new THREE.ShaderMaterial({
+        uniforms: {
+          c: { value: 0.6 },
+          p: { value: 2.4 },
+          glowColor: { value: new THREE.Color(0x3fa6ff) },
+          viewVector: { value: camera.position },
+        },
+        vertexShader: `
+          uniform vec3 viewVector;
+          uniform float c;
+          uniform float p;
+          varying float intensity;
+          void main() {
+            vec3 vNormal = normalize(normalMatrix * normal);
+            vec3 vNormel = normalize(normalMatrix * viewVector);
+            intensity = pow(c - dot(vNormal, vNormel), p);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 glowColor;
+          varying float intensity;
+          void main() {
+            gl_FragColor = vec4(glowColor * intensity, intensity);
+          }
+        `,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+      });
+      const atmosphere = new THREE.Mesh(atmosphereGeo, atmosphereMat);
+      earthGroup.add(atmosphere);
+    }
+
+    const cities = [
+      { name: 'Bangkok', country: 'Thailand', lat: 13.7563, lon: 100.5018, tz: 'Asia/Bangkok' },
+      { name: 'Tokyo', country: 'Japan', lat: 35.6762, lon: 139.6503, tz: 'Asia/Tokyo' },
+      { name: 'New York', country: 'USA', lat: 40.7128, lon: -74.0060, tz: 'America/New_York' },
+      { name: 'London', country: 'United Kingdom', lat: 51.5074, lon: -0.1278, tz: 'Europe/London' },
+      { name: 'Paris', country: 'France', lat: 48.8566, lon: 2.3522, tz: 'Europe/Paris' },
+      { name: 'Sydney', country: 'Australia', lat: -33.8688, lon: 151.2093, tz: 'Australia/Sydney' },
+      { name: 'Cape Town', country: 'South Africa', lat: -33.9249, lon: 18.4241, tz: 'Africa/Johannesburg' },
+      { name: 'Rio de Janeiro', country: 'Brazil', lat: -22.9068, lon: -43.1729, tz: 'America/Sao_Paulo' },
+      { name: 'Moscow', country: 'Russia', lat: 55.7558, lon: 37.6173, tz: 'Europe/Moscow' },
+      { name: 'Dubai', country: 'UAE', lat: 25.2048, lon: 55.2708, tz: 'Asia/Dubai' },
+    ];
+
+    const markerGroup = new THREE.Group();
+    earthGroup.add(markerGroup);
+    const interactiveMarkers = [];
+
+    function latLonToVector3(lat, lon, radius) {
+      const phi = (90 - lat) * (Math.PI / 180);
+      const theta = (lon + 180) * (Math.PI / 180);
+      return new THREE.Vector3(
+        -radius * Math.sin(phi) * Math.cos(theta),
+        radius * Math.cos(phi),
+        radius * Math.sin(phi) * Math.sin(theta)
+      );
+    }
+
+    function buildMarkers() {
+      const ringGeo = new THREE.RingGeometry(0.04, 0.07, 32);
+      const dotGeo = new THREE.SphereGeometry(0.045, 16, 16);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0xffc107, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+      const dotMat = new THREE.MeshBasicMaterial({ color: 0xffe066 });
+
+      cities.forEach((city) => {
+        const marker = new THREE.Group();
+        const ring = new THREE.Mesh(ringGeo, ringMat.clone());
+        const dot = new THREE.Mesh(dotGeo, dotMat.clone());
+        ring.position.set(0, 0, 0);
+        dot.position.set(0, 0, 0.02);
+        marker.add(ring, dot);
+
+        const pos = latLonToVector3(city.lat, city.lon, 2.52);
+        marker.position.copy(pos);
+        marker.lookAt(pos.clone().multiplyScalar(1.5));
+        marker.userData = city;
+        markerGroup.add(marker);
+        interactiveMarkers.push(marker);
+      });
+    }
+
+    function haversineDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = THREE.MathUtils.degToRad(lat2 - lat1);
+      const dLon = THREE.MathUtils.degToRad(lon2 - lon1);
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(THREE.MathUtils.degToRad(lat1)) * Math.cos(THREE.MathUtils.degToRad(lat2)) * Math.sin(dLon / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function formatTime(tz) {
+      try {
+        return new Intl.DateTimeFormat('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: tz }).format(new Date());
+      } catch (e) {
+        return '-';
+      }
+    }
+
+    let currentHover = null;
+
+    function updateInfo(city) {
+      if (!city) {
+        infoName.textContent = '-';
+        infoCountry.textContent = '-';
+        infoTime.textContent = '-';
+        infoDistance.textContent = '-';
+        infoCoord.textContent = '-';
+        tooltipEl.classList.add('hidden');
+        return;
+      }
+      const dist = haversineDistance(13.7563, 100.5018, city.lat, city.lon);
+      const time = formatTime(city.tz);
+      infoName.textContent = city.name;
+      infoCountry.textContent = city.country;
+      infoTime.textContent = time;
+      infoDistance.textContent = `${dist.toFixed(1)} กม.`;
+      infoCoord.textContent = `${city.lat.toFixed(4)}, ${city.lon.toFixed(4)}`;
+      tooltipEl.textContent = `${city.name} • ${time}`;
+      tooltipEl.classList.remove('hidden');
+    }
+
+    let pinchActive = false;
+    let lastPointer = new THREE.Vector2();
+    const pointer = new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2);
+    const pointerTarget = pointer.clone();
+    lastPointer.copy(pointerTarget);
+
+    function updateCursorVisual() {
+      cursorEl.style.background = pinchActive ? '#ff9800' : '#00e5ff';
+      cursorEl.style.boxShadow = pinchActive ? '0 0 18px rgba(255,152,0,0.8)' : '0 0 20px rgba(0,229,255,0.7)';
+      cursorEl.style.left = `${pointer.x}px`;
+      cursorEl.style.top = `${pointer.y}px`;
+      if (!tooltipEl.classList.contains('hidden')) {
+        tooltipEl.style.left = `${pointer.x}px`;
+        tooltipEl.style.top = `${pointer.y}px`;
+      }
+    }
+
+    const raycaster = new THREE.Raycaster();
+    function handleHover() {
+      const ndc = new THREE.Vector2(
+        (pointer.x / window.innerWidth) * 2 - 1,
+        -(pointer.y / window.innerHeight) * 2 + 1
+      );
+      raycaster.setFromCamera(ndc, camera);
+      const intersections = raycaster.intersectObjects(interactiveMarkers, true);
+      if (intersections.length > 0) {
+        const marker = intersections[0].object.parent || intersections[0].object;
+        if (currentHover !== marker) {
+          if (currentHover) {
+            currentHover.children.forEach((c) => c.material && c.material.color && c.material.color.setHex(c.userData?.originalColor || c.material.color.getHex()));
+          }
+          currentHover = marker;
+          marker.children.forEach((child) => {
+            if (child.material && child.material.color) {
+              child.userData = child.userData || {};
+              child.userData.originalColor = child.material.color.getHex();
+              child.material.color.setHex(0x00e5ff);
+            }
+          });
+          updateInfo(marker.userData);
+        }
+      } else {
+        if (currentHover) {
+          currentHover.children.forEach((child) => {
+            if (child.material && child.material.color && child.userData?.originalColor !== undefined) {
+              child.material.color.setHex(child.userData.originalColor);
+            }
+          });
+        }
+        currentHover = null;
+        updateInfo(null);
+      }
+    }
+
+    function rotateEarthFromDelta(deltaX, deltaY) {
+      const rotSpeed = 0.005;
+      earthGroup.rotation.y += deltaX * rotSpeed;
+      earthGroup.rotation.x += deltaY * rotSpeed;
+      earthGroup.rotation.x = THREE.MathUtils.clamp(earthGroup.rotation.x, -Math.PI / 2.2, Math.PI / 2.2);
+    }
+
+    async function init() {
+      await buildEarth();
+      buildMarkers();
+      animate();
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      earthGroup.rotation.y += 0.0005;
+
+      pointer.lerp(pointerTarget, 0.25);
+      updateCursorVisual();
+      handleHover();
+      renderer.render(scene, camera);
+    }
+
+    function handleHandResults(results) {
+      const ctx = outputCanvas.getContext('2d');
+      outputCanvas.width = videoElement.videoWidth;
+      outputCanvas.height = videoElement.videoHeight;
+      ctx.save();
+      ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+      ctx.translate(outputCanvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(results.image, 0, 0, outputCanvas.width, outputCanvas.height);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length) {
+        const landmarks = results.multiHandLandmarks[0];
+        const indexTip = landmarks[8];
+        const thumbTip = landmarks[4];
+
+        const videoX = indexTip.x * outputCanvas.width;
+        const videoY = indexTip.y * outputCanvas.height;
+        const screenX = (1 - indexTip.x) * window.innerWidth;
+        const screenY = indexTip.y * window.innerHeight;
+        pointerTarget.set(screenX, screenY);
+
+        const dx = (thumbTip.x - indexTip.x);
+        const dy = (thumbTip.y - indexTip.y);
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        pinchActive = dist < 0.05;
+
+        if (pinchActive) {
+          const deltaX = pointerTarget.x - lastPointer.x;
+          const deltaY = pointerTarget.y - lastPointer.y;
+          rotateEarthFromDelta(deltaX, deltaY);
+        }
+        lastPointer.copy(pointerTarget);
+      }
+      ctx.restore();
+    }
+
+    function initMediaPipe() {
+      const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.6,
+      });
+      hands.onResults((results) => {
+        loadingOverlay.style.opacity = '0';
+        loadingOverlay.style.visibility = 'hidden';
+        handleHandResults(results);
+      });
+
+      const cameraMP = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480,
+      });
+      cameraMP.start();
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      pointerTarget.set(e.clientX, e.clientY);
+    });
+
+    init();
+    initMediaPipe();
+  </script>
+</body>
+</html>
